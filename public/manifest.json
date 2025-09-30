@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "REVO",
+  "version": "1.0",
+  "description": "Adds an explainer button to GitHub repos.",
+  "permissions": ["activeTab", "scripting"],
+  "content_scripts": [
+   {
+    "matches": ["https://github.com/*"],
+    "js": ["content.js"]
+   }
+  ], "web_accessible_resources": [
+   {
+    "resources": ["index.html", "assets/*"],
+    "matches": ["https://github.com/*"]
+   }
+  ]
+}
