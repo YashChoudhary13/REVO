@@ -17,15 +17,16 @@ Clicking the button opens a bottom overlay (75% of screen) powered by a React ap
 ---
 
 ## 📂 Project Structure
-REVO/
-├─ public/
-│ ├─ manifest.json # Extension config
-│ ├─ content.js # Injects REVO button + overlay
-├─ src/
-│ ├─ App.jsx # React app (Hello REVO)
-│ ├─ main.jsx
-├─ package.json
-├─ README.md
+
+📁 REVO  
+ ┣ 📁 public  
+ ┃ ┣ 📄 manifest.json   
+ ┃ ┗ 📄 content.js       
+ ┣ 📁 src  
+ ┃ ┣ 📄 App.jsx          
+ ┃ ┗ 📄 main.jsx  
+ ┣ 📄 package.json  
+ ┗ 📄 README.md
 
 ---
 
