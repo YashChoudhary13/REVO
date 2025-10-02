@@ -5,7 +5,9 @@ Clicking the button opens a bottom overlay (75% of screen) powered by a React ap
 
 ---
 
-## 🔥 Features (Day 1)
+## 🔥 Features by Development Day
+
+### Day 1
 - Chrome Extension (Manifest v3)
 - Vite + React setup
 - Injects REVO button next to **Watch** on GitHub repo pages
@@ -14,14 +16,29 @@ Clicking the button opens a bottom overlay (75% of screen) powered by a React ap
   - Close button
   - Pop Out button
 
+### Day 2
+- Overlay styling with smooth slide-in/out animations
+- Responsive design (desktop & mobile)
+- Draggable resize using a 3-dot handle
+- Auto-close when dragged completely down
+- Snap-to-size feel like native mobile bottom sheets
+
+*(Full engineering journey with problems faced & solutions in [DEVLOG.md](DEVLOG.md))*
 ---
+
+## 🛠 Tech Stack
+- Chrome Extensions (Manifest v3)
+- React + Vite
+- Vanilla JS for content script
+- CSS3 (responsive design, animations)
 
 ## 📂 Project Structure
 
 📁 REVO  
  ┣ 📁 public  
  ┃ ┣ 📄 manifest.json   
- ┃ ┗ 📄 content.js       
+ ┃ ┗ 📄 content.js  
+ ┃ ┗ 📄 content.css  
  ┣ 📁 src  
  ┃ ┣ 📄 App.jsx          
  ┃ ┗ 📄 main.jsx  
