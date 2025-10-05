@@ -23,6 +23,12 @@ Clicking the button opens a bottom overlay (75% of screen) powered by a React ap
 - Auto-close when dragged completely down
 - Snap-to-size feel like native mobile bottom sheets
 
+### Day 3
+- Integrated Hybrid Pipeline for analyzing repository structure.
+- Smart weighted file selection (cross-language).
+- AI-ready JSON payload creation.
+- REVO now context-aware and ready for AI summary generation.
+
 *(Full engineering journey with problems faced & solutions in [DEVLOG.md](DEVLOG.md))*
 ---
 
@@ -40,7 +46,8 @@ Clicking the button opens a bottom overlay (75% of screen) powered by a React ap
  ┃ ┗ 📄 content.js  
  ┃ ┗ 📄 content.css  
  ┣ 📁 src  
- ┃ ┣ 📄 App.jsx          
+ ┃ ┣ 📄 App.jsx 
+ ┃ ┣ 📄 index.css         
  ┃ ┗ 📄 main.jsx  
  ┣ 📄 package.json  
  ┗ 📄 README.md
