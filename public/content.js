@@ -68,14 +68,14 @@ window.addEventListener("load", () => {
     const rightGroup = document.createElement("div");
     rightGroup.className = "revo-right-actions";
 
-    const popOutBtn = document.createElement("button");
+    /* const popOutBtn = document.createElement("button");
     popOutBtn.innerText = "↗ Pop Out";
     popOutBtn.addEventListener("click", () => {
       window.open(chrome.runtime.getURL("index.html"), "_blank");
       container.classList.remove("revo-open");
       container.classList.add("revo-closing");
       container.addEventListener("transitionend", () => container.remove(), { once: true });
-    });
+    }); */
 
     const closeBtn = document.createElement("button");
     closeBtn.innerText = "✖ Close";
@@ -85,7 +85,7 @@ window.addEventListener("load", () => {
       container.addEventListener("transitionend", () => container.remove(), { once: true });
     });
 
-    rightGroup.appendChild(popOutBtn);
+    // rightGroup.appendChild(popOutBtn);
     rightGroup.appendChild(closeBtn);
 
     // Assemble the bar: left group (flex), right group (buttons).

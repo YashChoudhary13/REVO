@@ -1,18 +1,16 @@
 // src/App.jsx
-import { useEffect, useState, useRef, useMemo, startTransition } from "react";
-import { Suspense, lazy } from "react";
+import { useEffect, useState, useRef, useMemo, startTransition, Suspense, lazy } from "react";
 const ReactMarkdown = lazy(() => import("react-markdown"));
 
 /**
- * REVO — Final optimized overlay
- * • Robust GitHub repo analysis (tree + fallback)
- * • Scoring-based file selection with safe fallback
- * • Throttled concurrent fetches to avoid popup lag
- * • Dark, readable UI with improved spacing & line-height
+ * REVO — Overlay (worker-first, inline fallback)
+ * - Uses a background worker when available to avoid UI jank
+ * - Inline fallback runs during idle time and chunks downloads
+ * - Persists lightweight cache in sessionStorage while tab is active
+ * - Lazy-renders Markdown to keep popup responsive
  */
 
 function App() {
-  // states
   const [repoInfo, setRepoInfo] = useState(null);
   const [status, setStatus] = useState("Waiting for repository...");
   const [preview, setPreview] = useState("");
@@ -22,33 +20,79 @@ function App() {
   const [fetchingRepo, setFetchingRepo] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
+  // Try to restore lightweight cache (sessionStorage)
+  useEffect(() => {
+    try {
+      const cached = sessionStorage.getItem("revoData");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed?.repoInfo) setRepoInfo(parsed.repoInfo);
+        if (parsed?.payload) setPayload(parsed.payload);
+        if (parsed?.preview) setPreview(parsed.preview);
+        if (parsed?.aiSummary) setAiSummary(parsed.aiSummary);
+        if (parsed?.payload) setStatus("✅ Loaded previous session data");
+      }
+    } catch (e) {
+      console.warn("Failed to load cached REVO data", e);
+    }
+  }, []);
+
+  // persist safe, small cache whenever key state changes
+  useEffect(() => {
+    try {
+      const lightPayload = payload
+        ? {
+            repo: payload.repo,
+            metadata: payload.metadata,
+            filesAnalyzed: payload.filesAnalyzed,
+            // store only small snippet preview to avoid huge sessionStorage usage
+            samples: (payload.samples || []).map((s) => ({ path: s.path, snippet: String(s.snippet || "").slice(0, 200) })),
+          }
+        : null;
+
+      const cache = {
+        repoInfo,
+        payload: lightPayload,
+        preview,
+        aiSummary,
+        ts: Date.now(),
+      };
+      sessionStorage.setItem("revoData", JSON.stringify(cache));
+    } catch (e) {
+      // ignore persistence errors
+    }
+  }, [repoInfo, payload, preview, aiSummary]);
+
   // mounted guard
   const isMounted = useRef(true);
   useEffect(() => () => (isMounted.current = false), []);
 
-  // API base (env-aware)
+  // API base detection (env-aware)
   const isExtension = typeof chrome !== "undefined" && !!chrome.runtime?.id;
   const API_BASE =
     import.meta.env.VITE_API_BASE ||
     (isExtension ? "https://rev0.vercel.app" : import.meta.env.DEV ? "http://localhost:3000" : "https://rev0.vercel.app");
-  // worker ref (kept across mounts)
+
+  // worker reference
   const workerRef = useRef(null);
 
+  // init worker (if available)
   useEffect(() => {
     let worker;
     try {
+      // Vite-friendly worker import
       worker = new Worker(new URL("./worker/repoWorker.js", import.meta.url), { type: "module" });
       console.log("🧠 REVO Worker initialized successfully");
       workerRef.current = worker;
 
-      worker.onmessage = (e) => {
-        const d = e.data || {};
-        if (d.type === "result") {
-          console.log("📩 Worker result received:", d.payload?.filesAnalyzed, "files");
-          // batch state updates as non-urgent to avoid UI blocking
+      worker.onmessage = (ev) => {
+        const d = ev.data || {};
+        if (d.type === "result" && d.payload) {
+          console.log("📩 Worker result received:", d.payload.filesAnalyzed ?? 0, "files");
           startTransition(() => {
+            if (!isMounted.current) return;
             setPayload(d.payload);
-            setPreview(d.preview);
+            setPreview(d.preview || "");
             setStatus("✅ Repository ready for AI Handoff");
           });
           setFetchingRepo(false);
@@ -72,224 +116,239 @@ function App() {
 
     return () => {
       if (workerRef.current) {
-        try { workerRef.current.terminate(); } catch {}
+        try {
+          workerRef.current.terminate();
+        } catch {}
         workerRef.current = null;
+      }
+      if (worker) {
+        try {
+          worker.terminate();
+        } catch {}
       }
     };
   }, []);
 
-  // Read repo from query (overlay params)
+  // parse repo params from overlay URL
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const owner = params.get("owner");
     const repo = params.get("repo");
     if (owner && repo) {
-      setRepoInfo({ owner, repo });
+      // keep repoInfo small and deterministic; add '_nonce' on manual re-runs
+      setRepoInfo((prev) => (prev && prev.owner === owner && prev.repo === repo ? { owner, repo, _nonce: Date.now() } : { owner, repo, _nonce: Date.now() }));
       setStatus("Repository detected — preparing analysis...");
     } else {
       setStatus("⚠️ No repository parameters found.");
     }
   }, []);
 
-  // helper: redact obvious secrets
+  // redact obvious secrets
   function redactSecrets(text = "") {
-    return text.replace(
-      /(api[_-]?key|apikey|secret|password|token)\s*[:=]\s*([^\s'";,#]+)/gi,
-      "$1: [REDACTED]"
-    );
+    return text.replace(/(api[_-]?key|apikey|secret|password|token)\s*[:=]\s*([^\s'";,#]+)/gi, "$1: [REDACTED]");
   }
 
-  // fetch & analyze repository
-// --- Fetch & analyze repository (worker-first, idle fallback) ---
-useEffect(() => {
-  if (!repoInfo) return;
-  const controller = new AbortController();
-  const signal = controller.signal;
+  // idle helper (fallback to setTimeout if requestIdleCallback absent)
+  const idleRun = (fn) => (window.requestIdleCallback ? window.requestIdleCallback(fn) : setTimeout(fn, 60));
 
-  // inline fallback function (same logic as before but isolated so worker can be preferred)
-  async function fetchRepoDataInline() {
-    setFetchingRepo(true);
-    setErrorMsg("");
-    setAiSummary("");
-    setPayload(null);
-    setPreview("");
-    setStatus("Analyzing repository (inline fallback)...");
+  // fetch & analyze repository (worker-first, inline fallback)
+  useEffect(() => {
+    if (!repoInfo) return;
+    const controller = new AbortController();
+    const signal = controller.signal;
 
-    try {
-      const { owner, repo } = repoInfo;
-      const headers = { Accept: "application/vnd.github.v3+json" };
-      const GITHUB_TOKEN = import.meta.env.VITE_GITHUB_TOKEN;
-      if (GITHUB_TOKEN) headers.Authorization = `token ${GITHUB_TOKEN}`;
+    async function fetchRepoDataInline() {
+      setFetchingRepo(true);
+      setErrorMsg("");
+      setAiSummary("");
+      setPayload(null);
+      setPreview("");
+      setStatus("Analyzing repository (inline fallback)...");
 
-      // metadata
-      const metaRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers, signal });
-      if (!metaRes.ok) throw new Error(`GitHub metadata fetch failed (${metaRes.status})`);
-      const metaData = await metaRes.json();
-      const defaultBranch = metaData.default_branch || "main";
-
-      // try tree or fallback commit tree sha
-      let treeData = null;
       try {
-        const tryUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`;
-        const treeRes = await fetch(tryUrl, { headers, signal });
-        if (treeRes.ok) treeData = await treeRes.json();
-      } catch (e) {}
+        const { owner, repo } = repoInfo;
+        const headers = { Accept: "application/vnd.github.v3+json" };
+        const GITHUB_TOKEN = import.meta.env.VITE_GITHUB_TOKEN;
+        if (GITHUB_TOKEN) headers.Authorization = `token ${GITHUB_TOKEN}`;
 
-      if (!treeData || !treeData.tree) {
-        const commitRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${defaultBranch}`, { headers, signal });
-        if (commitRes.ok) {
-          const commitData = await commitRes.json();
-          const treeSha = commitData?.commit?.tree?.sha || commitData?.commit?.tree;
-          if (treeSha) {
-            const treeRes2 = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`, { headers, signal });
-            if (treeRes2.ok) treeData = await treeRes2.json();
+        // metadata
+        const metaRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers, signal });
+        if (!metaRes.ok) throw new Error(`GitHub metadata fetch failed (${metaRes.status})`);
+        const metaData = await metaRes.json();
+        const defaultBranch = metaData.default_branch || "main";
+
+        // try tree or fallback commit-tree sha
+        let treeData = null;
+        try {
+          const tryUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`;
+          const treeRes = await fetch(tryUrl, { headers, signal });
+          if (treeRes.ok) treeData = await treeRes.json();
+        } catch (e) {}
+
+        if (!treeData || !treeData.tree) {
+          const commitRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${defaultBranch}`, { headers, signal });
+          if (commitRes.ok) {
+            const commitData = await commitRes.json();
+            const treeSha = commitData?.commit?.tree?.sha || commitData?.commit?.tree;
+            if (treeSha) {
+              const treeRes2 = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`, { headers, signal });
+              if (treeRes2.ok) treeData = await treeRes2.json();
+            }
           }
         }
+
+        if (!treeData || !treeData.tree) throw new Error("Could not retrieve repository tree.");
+
+        const allFiles = treeData.tree.filter((f) => f.type === "blob").map((f) => f.path || "");
+        const weights = [
+          { pattern: "readme", score: 10 },
+          { pattern: "package.json", score: 10 },
+          { pattern: "requirements.txt", score: 10 },
+          { pattern: "pyproject.toml", score: 8 },
+          { pattern: "main.", score: 9 },
+          { pattern: "src/", score: 9 },
+          { pattern: "index.", score: 8 },
+          { pattern: "app.", score: 8 },
+          { pattern: "lib/", score: 6 },
+          { pattern: "core/", score: 5 },
+          { pattern: "components/", score: 5 },
+          { pattern: "dockerfile", score: 4 },
+          { pattern: ".github/workflows", score: 3 },
+          { pattern: "tests/", score: 3 },
+          { pattern: "docs/", score: 2 },
+        ];
+
+        function scoreFile(path) {
+          if (/\.(png|jpg|jpeg|gif|svg|ico|map|lock|zip|pdf|mp4|exe|dll)$/i.test(path)) return -999;
+          const l = (path || "").toLowerCase();
+          return weights.reduce((acc, w) => (l.includes(w.pattern) ? acc + w.score : acc), 0);
+        }
+
+        const ranked = allFiles.map((p) => ({ path: p, score: scoreFile(p) })).filter((f) => f.score > 0).sort((a, b) => b.score - a.score);
+        let finalFiles = ranked.slice(0, 15).map((f) => f.path);
+        if (!finalFiles.length) finalFiles = allFiles.filter((p) => /\.(js|ts|py|java|go|md|json|yaml|yml)$/i.test(p)).slice(0, 15);
+
+        setStatus(`📦 Found ${allFiles.length} files. Selecting ${finalFiles.length}...`);
+
+        // chunked fetch to avoid blocking UI
+        const CONCURRENCY = 4;
+        const chunks = [];
+        for (let i = 0; i < finalFiles.length; i += CONCURRENCY) chunks.push(finalFiles.slice(i, i + CONCURRENCY));
+
+        let sampleContents = [];
+        for (const chunk of chunks) {
+          const results = await Promise.all(
+            chunk.map(async (path) => {
+              try {
+                if (/(^|\/)\.(env|env.local|secrets|credentials)/i.test(path)) {
+                  return { path, snippet: "[REDACTED - sensitive file]" };
+                }
+                const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${path}`;
+                const r = await fetch(rawUrl, { signal });
+                if (!r.ok) return null;
+                const text = await r.text();
+                return { path, snippet: redactSecrets(text).slice(0, 1000) };
+              } catch (err) {
+                return null;
+              }
+            })
+          );
+          sampleContents = sampleContents.concat(results.filter(Boolean));
+          // yield to event loop so popup stays responsive
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+
+        const payloadData = {
+          repo: `${owner}/${repo}`,
+          detectedType: "Detected",
+          metadata: {
+            name: metaData.full_name,
+            description: metaData.description,
+            stars: metaData.stargazers_count,
+            forks: metaData.forks_count,
+            language: metaData.language,
+            branch: defaultBranch,
+          },
+          filesAnalyzed: sampleContents.length,
+          samples: sampleContents,
+        };
+
+        if (isMounted.current) {
+          startTransition(() => {
+            setPayload(payloadData);
+            setPreview(
+              [
+                `📦 ${payloadData.repo}`,
+                `🧠 Type: ${payloadData.detectedType}`,
+                `⭐ Stars: ${payloadData.metadata.stars} | 🍴 Forks: ${payloadData.metadata.forks}`,
+                `🗂️ Files analyzed: ${payloadData.filesAnalyzed}`,
+                `Language: ${payloadData.metadata.language}`,
+                `Branch: ${payloadData.metadata.branch}`,
+                "",
+                "✅ Ready for AI Handoff",
+              ].join("\n")
+            );
+            setStatus("✅ Repository ready for AI analysis.");
+          });
+        }
+      } catch (err) {
+        console.error("Repo fetch error (inline):", err);
+        if (isMounted.current) {
+          setStatus("⚠️ Repository fetch failed (inline).");
+          setErrorMsg(err?.message || "Repository analysis failed. Check logs.");
+        }
+      } finally {
+        if (isMounted.current) setFetchingRepo(false);
       }
+    }
 
-      if (!treeData || !treeData.tree) throw new Error("Could not retrieve repository tree.");
-
-      // collect file paths
-      const allFiles = treeData.tree.filter((f) => f.type === "blob").map((f) => f.path);
-
-      // simple scorer (mirrors worker)
-      const weights = [
-        { pattern: "readme", score: 10 },
-        { pattern: "package.json", score: 10 },
-        { pattern: "requirements.txt", score: 10 },
-        { pattern: "pyproject.toml", score: 8 },
-        { pattern: "main.", score: 9 },
-        { pattern: "src/", score: 9 },
-        { pattern: "index.", score: 8 },
-        { pattern: "app.", score: 8 },
-        { pattern: "lib/", score: 6 },
-        { pattern: "core/", score: 5 },
-        { pattern: "components/", score: 5 },
-        { pattern: "dockerfile", score: 4 },
-        { pattern: ".github/workflows", score: 3 },
-        { pattern: "tests/", score: 3 },
-        { pattern: "docs/", score: 2 },
-      ];
-
-      function scoreFile(path) {
-        if (/\.(png|jpg|jpeg|gif|svg|ico|map|lock|zip|pdf|mp4|exe|dll)$/i.test(path)) return -999;
-        const l = (path || "").toLowerCase();
-        return weights.reduce((acc, w) => (l.includes(w.pattern) ? acc + w.score : acc), 0);
-      }
-
-      const ranked = allFiles.map((p) => ({ path: p, score: scoreFile(p) })).filter((f) => f.score > 0).sort((a, b) => b.score - a.score);
-      let finalFiles = ranked.slice(0, 15).map((f) => f.path);
-      if (!finalFiles.length) finalFiles = allFiles.filter((p) => /\.(js|ts|py|java|go|md|json|yaml|yml)$/i.test(p)).slice(0, 15);
-
-      setStatus(`📦 Found ${allFiles.length} files. Selecting ${finalFiles.length}...`);
-
-      // throttled chunked fetches (CONCURRENCY)
-      const CONCURRENCY = 5;
-      const chunks = [];
-      for (let i = 0; i < finalFiles.length; i += CONCURRENCY) chunks.push(finalFiles.slice(i, i + CONCURRENCY));
-
-      let sampleContents = [];
-      for (const chunk of chunks) {
-        const results = await Promise.all(
-          chunk.map(async (path) => {
-            try {
-              if (/(^|\/)\.(env|env.local|secrets|credentials)/i.test(path)) return { path, snippet: "[REDACTED - sensitive file]" };
-              const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${path}`;
-              const r = await fetch(rawUrl, { signal });
-              if (!r.ok) return null;
-              const text = await r.text();
-              return { path, snippet: redactSecrets(text).slice(0, 1000) };
-            } catch (err) {
-              return null;
-            }
-          })
-        );
-        sampleContents = sampleContents.concat(results.filter(Boolean));
-        // small yield to event loop so UI stays responsive
-        await new Promise((res) => setTimeout(res, 20));
-      }
-
-      const payloadData = {
-        repo: `${owner}/${repo}`,
-        detectedType: "Detected",
-        metadata: {
-          name: metaData.full_name,
-          description: metaData.description,
-          stars: metaData.stargazers_count,
-          forks: metaData.forks_count,
-          language: metaData.language,
-          branch: defaultBranch,
-        },
-        filesAnalyzed: sampleContents.length,
-        samples: sampleContents,
-      };
-
-      if (isMounted.current) {
-        startTransition(() => {
-          setPayload(payloadData);
-          setPreview([
-            `📦 ${payloadData.repo}`,
-            `🧠 Type: ${payloadData.detectedType}`,
-            `⭐ Stars: ${payloadData.metadata.stars} | 🍴 Forks: ${payloadData.metadata.forks}`,
-            `🗂️ Files analyzed: ${payloadData.filesAnalyzed}`,
-            `Language: ${payloadData.metadata.language}`,
-            `Branch: ${payloadData.metadata.branch}`,
-            "",
-            "✅ Ready for AI Handoff",
-          ].join("\n"));
-          setStatus("✅ Repository ready for AI analysis.");
+    // send to worker if available otherwise idle-run inline
+    if (workerRef.current) {
+      setFetchingRepo(true);
+      setErrorMsg("");
+      setAiSummary("");
+      setPayload(null);
+      setPreview("");
+      setStatus("Analyzing repository (background worker)...");
+      try {
+        workerRef.current.postMessage({
+          owner: repoInfo.owner,
+          repo: repoInfo.repo,
+          token: import.meta.env.VITE_GITHUB_TOKEN || null,
+          sampleLimit: 15,
+          maxSnippetLength: 1000,
+          concurrency: 4,
         });
+      } catch (err) {
+        console.warn("Worker postMessage failed, falling back to inline:", err);
+        idleRun(() => fetchRepoDataInline());
       }
+    } else {
+      idleRun(() => {
+        fetchRepoDataInline().catch((e) => console.error("fetchRepoDataInline error:", e));
+      });
+    }
 
-    } catch (err) {
-      console.error("Repo fetch error (inline):", err);
-      if (isMounted.current) {
-        setStatus("⚠️ Repository fetch failed (inline).");
-        setErrorMsg(err?.message || "Repository analysis failed. Check logs.");
+    return () => {
+      try {
+        controller.abort();
+      } catch {}
+    };
+  }, [repoInfo]);
+
+  // reanalyze listener (other pieces of code can dispatch a revo:reanalyze event)
+  useEffect(() => {
+    const handler = (e) => {
+      const info = e?.detail;
+      if (info && info.owner && info.repo) {
+        // create new object (different identity) to retrigger effect
+        setRepoInfo({ owner: info.owner, repo: info.repo, _nonce: Date.now() });
+        setStatus("Re-analysis requested...");
       }
-    } finally {
-      if (isMounted.current) setFetchingRepo(false);
-    }
-  }
-
-  // helper for idle scheduling
-  const idleRun = (fn) => (window.requestIdleCallback || ((cb) => setTimeout(cb, 50)))(fn);
-
-  // If the worker is available, use it (non-blocking), else fallback to inline (idle)
-  if (workerRef.current) {
-    setFetchingRepo(true);
-    setErrorMsg("");
-    setAiSummary("");
-    setPayload(null);
-    setPreview("");
-    setStatus("Analyzing repository (background worker)...");
-    try {
-      workerRef.current.postMessage({
-        owner: repoInfo.owner,
-        repo: repoInfo.repo,
-        token: import.meta.env.VITE_GITHUB_TOKEN || null,
-        sampleLimit: 15,
-        maxSnippetLength: 1000,
-        concurrency: 4,
-      });
-    } catch (err) {
-      // If postMessage fails, run inline fallback
-      console.warn("Worker postMessage failed, falling back to inline:", err);
-      idleRun(() => fetchRepoDataInline());
-    }
-  } else {
-    // schedule inline work during idle to avoid jank
-    idleRun(() => {
-      fetchRepoDataInline().catch((e) => {
-        console.error("fetchRepoDataInline error:", e);
-      });
-    });
-  }
-
-  return () => {
-    try { controller.abort(); } catch {}
-  };
-}, [repoInfo]);
+    };
+    window.addEventListener("revo:reanalyze", handler);
+    return () => window.removeEventListener("revo:reanalyze", handler);
+  }, []);
 
   // AI handoff
   async function handleAIHandoff() {
@@ -321,6 +380,7 @@ useEffect(() => {
       const data = await res.json();
       const summaryText = data.summary || "⚠️ No summary returned from AI.";
       startTransition(() => {
+        if (!isMounted.current) return;
         setAiSummary(`${summaryText}\n\n---\n⚡ Generated in ${data.latency || "?"}s · ${data.tokens || "?"} tokens · Model: ${data.model || "unknown"}`);
         setStatus("✅ AI analysis complete.");
       });
@@ -334,35 +394,51 @@ useEffect(() => {
     }
   }
 
+  // Ask-REVO feature
   async function handleAskRevo(question) {
-  if (!payload) return alert("Analyze a repo first!");
-  setLoadingAI(true);
-  setStatus("💬 Asking REVO...");
-  try {
-    const res = await fetch(`${API_BASE}/api/askRevo`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        summary: aiSummary,
-        samples: payload.samples,
-        question,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Ask REVO failed");
-    setAiSummary((prev) => `${prev}\n\n**Q:** ${question}\n**A:** ${data.answer}`);
-    setStatus("✅ REVO answered your question.");
-  } catch (err) {
-    console.error(err);
-    setStatus("⚠️ Ask REVO failed.");
-  } finally {
-    setLoadingAI(false);
+    if (!payload) return alert("Analyze a repo first!");
+    setLoadingAI(true);
+    setStatus("💬 Asking REVO...");
+    try {
+      const res = await fetch(`${API_BASE}/api/askRevo`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          summary: aiSummary,
+          samples: payload.samples,
+          question,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Ask REVO failed");
+      setAiSummary((prev) => `${prev}\n\n**Q:** ${question}\n**A:** ${data.answer}`);
+      setStatus("✅ REVO answered your question.");
+    } catch (err) {
+      console.error(err);
+      setStatus("⚠️ Ask REVO failed.");
+    } finally {
+      setLoadingAI(false);
+    }
   }
-}
 
   const markdown = useMemo(() => aiSummary, [aiSummary]);
 
-  // UI
+  // UI — reset now re-runs analysis (keeps cache until tab closed)
+  const handleReset = () => {
+    if (!repoInfo) {
+      setStatus("No repository detected.");
+      return;
+    }
+    // clear transient UI but keep repoInfo; mutate identity to retrigger effect
+    setPreview("");
+    setPayload(null);
+    setAiSummary("");
+    setErrorMsg("");
+    setStatus("Re-analyzing repository...");
+    setFetchingRepo(true);
+    setRepoInfo({ owner: repoInfo.owner, repo: repoInfo.repo, _nonce: Date.now() });
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-[#0D1117] text-gray-100 font-inter text-[15px]">
       {/* Header */}
@@ -376,13 +452,7 @@ useEffect(() => {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={() => {
-              setPreview("");
-              setPayload(null);
-              setAiSummary("");
-              setStatus("Ready");
-              setErrorMsg("");
-            }}
+            onClick={handleReset}
             className="px-3 py-1 text-xs border border-[#30363D] rounded-md hover:bg-[#21262D] transition"
           >
             Reset
@@ -434,10 +504,9 @@ useEffect(() => {
             </div>
           </Suspense>
         )}
-
       </main>
 
-      {/* Footer (sticky, avoids bottom whitespace) */}
+      {/* Footer (sticky, Ask REVO) */}
       <footer className="sticky bottom-0 px-6 py-3 border-t border-[#30363D] bg-[#0D1117]/95 backdrop-blur-md">
         <form
           onSubmit={(e) => {
@@ -454,6 +523,7 @@ useEffect(() => {
             type="text"
             placeholder="Ask REVO about this repo..."
             className="flex-1 px-3 py-2 rounded-md bg-[#161B22] border border-[#30363D] text-gray-100 placeholder-gray-500"
+            disabled={!payload}
           />
           <button
             type="submit"
@@ -465,16 +535,9 @@ useEffect(() => {
         </form>
       </footer>
 
-      {/* small animation helper */}
       <style>{`
-        .prose p, .prose li {
-          line-height: 1.75 !important;
-          letter-spacing: 0.01em;
-        }
-        @keyframes fade-in {
-          from { opacity: 0; transform: translateY(8px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
+        .prose p, .prose li { line-height: 1.75 !important; letter-spacing: 0.01em; }
+        @keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
         .animate-fade-in { animation: fade-in 0.6s ease-out forwards; }
       `}</style>
     </div>
