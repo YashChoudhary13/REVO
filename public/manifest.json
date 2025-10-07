@@ -4,6 +4,11 @@
   "version": "1.0",
   "description": "Adds an explainer button to GitHub repos.",
   "permissions": ["activeTab", "scripting"],
+  "host_permissions": [
+    "https://github.com/*",
+    "https://revo-dsvej92vo-yashchoudhary13s-projects.vercel.app/*",
+    "https://rev0.vercel.app/*"
+  ],
   "content_scripts": [
    {
     "matches": ["https://github.com/*"],
