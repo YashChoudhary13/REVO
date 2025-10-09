@@ -234,6 +234,54 @@ VITE_API_BASE=http://localhost:3000
 
 ---
 
+## 🧩 Day 7 — REVO v2 Kickoff: PR Page Integration & Lifecycle Fix
+
+### 🏁 Goal
+Today marks the start of **REVO v2**, where we’re expanding our extension beyond repo analysis into **intelligent Pull Request (PR) support**.  
+The vision is to make REVO act like an **AI reviewer** — analyzing PRs, suggesting architectural improvements, and detecting potential risks in code changes.
+
+---
+
+### ⚙️ What We Worked On
+We began by setting up REVO to **detect and function inside GitHub Pull Request pages**.
+
+**Key steps:**
+1. **PR Detection Logic**  
+   Implemented logic to identify when the user is on a PR page (`/pull/{id}`).
+
+2. **Dynamic Button Injection**  
+   Added a “Run REVO” button in the PR header (`.gh-header-actions`) for instant access.
+
+3. **SPA-Aware Architecture**  
+   GitHub uses a *Single Page Application* (PJAX) — no full page reloads between navigation.  
+   To handle this, we implemented a **MutationObserver + URL watcher hybrid**, allowing REVO to:
+   - Detect in-page URL changes  
+   - Re-inject itself when DOM content changes dynamically  
+   - Stay consistent across PR tabs (Conversation, Commits, Files Changed)
+
+4. **Unified Logic for Repo + PR Pages**  
+   Merged our older repo logic and the new PR logic into one clean, dynamic architecture.  
+   REVO can now adapt to the current page context automatically.
+
+---
+
+### 🪲 The Bug We Discovered
+When loading GitHub **directly on a repo page** (e.g., refreshing or opening from bookmark),  
+REVO didn’t inject its button on first load.
+
+**Root Cause:**  
+`onUrlChange()` skipped execution since `lastUrl` equaled `location.href` at startup.  
+The code only triggered when the URL changed — which doesn’t happen during an initial load.
+
+**✅ Fix:**  
+Force-trigger the first run by resetting `lastUrl` before initialization:
+
+```js
+lastUrl = "";
+onUrlChange();
+
+
+
 ## Next steps & optional roadmap (future work)
 - Persistent Cache - Cache repo analysis (tree + sample files) in IndexedDB to skip re-fetch on same repo
 - History View - Show previous analyzed repos in sidebar
